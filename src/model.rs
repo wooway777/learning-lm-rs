@@ -167,7 +167,20 @@ fn mlp(
     rms_w: &Tensor<f32>,
     eps: f32,
 ) {
-    todo!("Implement mlp");
+    // Step 1: RMS normalization
+    OP::rms_norm(hidden_states, residual, rms_w, eps);
+    
+    // Step 2: Compute gate projection
+    OP::matmul_transb(gate, 0.0, hidden_states, w_gate, 1.0);
+    
+    // Step 3: Compute up projection 
+    OP::matmul_transb(up, 0.0, hidden_states, w_up, 1.0);
+
+    // Step 4: Apply SwiGLU activation (gate * sigmoid(gate) * up)
+    OP::swiglu(up, gate);  // up = up * silu(gate)
+    
+    // Step 5: Compute output and add to residual
+    OP::matmul_transb(residual, 1.0, up, w_down, 1.0);
 }
 
 #[test]

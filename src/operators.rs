@@ -71,25 +71,102 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 }
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    // todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    assert_eq!(x.shape(), y.shape());
+    let last_dim = x.shape()[x.shape().len() - 1];
+    assert_eq!(w.size(), last_dim);
+
+    let x_data = x.data();
+    let w_data = w.data();
+    let y_data = unsafe { y.data_mut() };
+
+    // Calculate the number of vectors in the input tensor
+    let num_vectors = x.size() / last_dim;
+    
+    for i in 0..num_vectors {
+        let offset = i * last_dim;
+        let slice = &x_data[offset..offset + last_dim];
+        
+        // Calculate mean square
+        let mean_sq = slice.iter().map(|&v| v * v).sum::<f32>() / last_dim as f32;
+        let rms = (mean_sq + epsilon).sqrt();
+        
+        // Normalize and scale by weights
+        for j in 0..last_dim {
+            y_data[offset + j] = (x_data[offset + j] / rms) * w_data[j];
+        }
+    }
 }
 
 // y = silu(x) * y
 // hint: this is an element-wise operation
 pub fn swiglu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
-    // let len = y.size();
-    // assert!(len == x.size());
+    let len = y.size();
+    assert!(len == x.size());
 
-    // let _y = unsafe { y.data_mut() };
-    // let _x = x.data();
+    let _y = unsafe { y.data_mut() };
+    let _x = x.data();
 
-    todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+    // todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+
+    for i in 0..len {
+        let sigmoid = 1.0 / (1.0 + (-_x[i]).exp());
+        let silu = _x[i] * sigmoid;
+        _y[i] *= silu;
+    }
 }
 
 // C = beta * C + alpha * A @ B^T
 // hint: You don't need to do an explicit transpose of B
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    // todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    let c_shape = c.shape();
+    
+    assert_eq!(a_shape.len(), 2);
+    assert_eq!(b_shape.len(), 2);
+    assert_eq!(c_shape.len(), 2);
+    
+    let m = a_shape[0];
+    let k = a_shape[1];
+    let n = b_shape[0];
+    
+    assert_eq!(b_shape[1], k);
+    assert_eq!(c_shape[0], m);
+    assert_eq!(c_shape[1], n);
+    
+    let a_data = a.data();
+    let b_data = b.data();
+    let c_data = unsafe { c.data_mut() };
+
+    // Optimization 1: Loop reordering (better cache locality)
+    for j in 0..n {
+        for i in 0..m {
+            // Optimization 2: Use pointer arithmetic to reduce index calculations
+            let a_row = &a_data[i * k..(i + 1) * k];
+            let b_row = &b_data[j * k..(j + 1) * k];
+            
+            // Optimization 3: Manual loop unrolling (4-way)
+            let mut sum = 0.0;
+            let mut l = 0;
+            while l + 3 < k {
+                sum += a_row[l] * b_row[l] 
+                     + a_row[l+1] * b_row[l+1]
+                     + a_row[l+2] * b_row[l+2]
+                     + a_row[l+3] * b_row[l+3];
+                l += 4;
+            }
+            // Remainder loop
+            for l in l..k {
+                sum += a_row[l] * b_row[l];
+            }
+            
+            // Optimization 4: Fused multiply-add
+            let idx = i * n + j;
+            c_data[idx] = f32::mul_add(alpha, sum, beta * c_data[idx]);
+        }
+    }
 }
 
 // Dot product of two tensors (treated as vectors)
