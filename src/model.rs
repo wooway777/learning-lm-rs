@@ -218,78 +218,75 @@ fn self_attention(
     total_seq_len: usize,
     dqkv: usize,
 ) {
-    // todo!("Implement self_attention");
+    // Step 1: Compute scaling factor for dot products
     let scale = 1.0 / (dqkv as f32).sqrt();
     let q_data = q.data();
     let k_data = k.data();
     let v_data = v.data();
-    let mut att_scores_data = unsafe { att_scores.data_mut() };
-    let mut hidden_states_data = unsafe { hidden_states.data_mut() };
 
-    // Pre-compute the attention scores
-    for h in 0..n_kv_h {
-        for g in 0..n_groups {
-            for i in 0..seq_len {
-                // Compute Q @ K^T * scale
-                let q_offset = i * n_kv_h * n_groups * dqkv + h * n_groups * dqkv + g * dqkv;
-                let q_slice = &q_data[q_offset..q_offset + dqkv];
-                
-                let mut max_score = f32::NEG_INFINITY;
-                for j in 0..total_seq_len {
-                    let k_offset = j * n_kv_h * dqkv + h * dqkv;
-                    let k_slice = &k_data[k_offset..k_offset + dqkv];
+    // Compute attention scores: Q @ K^T * scale
+    {
+        let att_scores_data = unsafe { att_scores.data_mut() };
+        for kv_head in 0..n_kv_h {
+            for group in 0..n_groups {
+                for query_pos in 0..seq_len {
+                    let q_offset = query_pos * n_kv_h * n_groups * dqkv 
+                                + kv_head * n_groups * dqkv 
+                                + group * dqkv;
+                    let query_vector = &q_data[q_offset..q_offset + dqkv];
                     
-                    let mut score = 0.0;
-                    for d in 0..dqkv {
-                        score += q_slice[d] * k_slice[d];
+                    for key_pos in 0..total_seq_len {
+                        let k_offset = key_pos * n_kv_h * dqkv + kv_head * dqkv;
+                        let key_vector = &k_data[k_offset..k_offset + dqkv];
+                        
+                        let mut score = 0.0;
+                        for dim in 0..dqkv {
+                            score += query_vector[dim] * key_vector[dim];
+                        }
+                        score *= scale;
+                        
+                        let score_idx = kv_head * n_groups * seq_len * total_seq_len 
+                                       + group * seq_len * total_seq_len 
+                                       + query_pos * total_seq_len 
+                                       + key_pos;
+                        att_scores_data[score_idx] = score;
                     }
-                    score *= scale;
-                    
-                    att_scores_data[h * n_groups * seq_len * total_seq_len 
-                                  + g * seq_len * total_seq_len 
-                                  + i * total_seq_len 
-                                  + j] = score;
-                    max_score = max_score.max(score);
                 }
-                
-                // Softmax
-                let mut sum = 0.0;
-                for j in 0..total_seq_len {
-                    let idx = h * n_groups * seq_len * total_seq_len 
-                           + g * seq_len * total_seq_len 
-                           + i * total_seq_len 
-                           + j;
-                    let val = (att_scores_data[idx] - max_score).exp();
-                    att_scores_data[idx] = val;
-                    sum += val;
-                }
-                
-                for j in 0..total_seq_len {
-                    let idx = h * n_groups * seq_len * total_seq_len 
-                           + g * seq_len * total_seq_len 
-                           + i * total_seq_len 
-                           + j;
-                    att_scores_data[idx] /= sum;
-                }
-                
-                // Weighted sum of values
-                let out_offset = i * n_kv_h * n_groups * dqkv + h * n_groups * dqkv + g * dqkv;
-                for d in 0..dqkv {
-                    let mut val = 0.0;
-                    for j in 0..total_seq_len {
-                        let v_offset = j * n_kv_h * dqkv + h * dqkv + d;
-                        val += att_scores_data[h * n_groups * seq_len * total_seq_len 
-                                            + g * seq_len * total_seq_len 
-                                            + i * total_seq_len 
-                                            + j] 
-                             * v_data[v_offset];
+            }
+        }
+    }
+
+    // Apply masked softmax to attention scores
+    OP::masked_softmax(att_scores);
+
+    // Compute attention-weighted value vectors (attn @ V)
+    {
+        let att_scores_data = att_scores.data();
+        let hidden_states_data = unsafe { hidden_states.data_mut() };
+        for kv_head in 0..n_kv_h {
+            for group in 0..n_groups {
+                for query_pos in 0..seq_len {
+                    let output_offset = query_pos * n_kv_h * n_groups * dqkv 
+                                      + kv_head * n_groups * dqkv 
+                                      + group * dqkv;
+                    for dim in 0..dqkv {
+                        let mut weighted_sum = 0.0;
+                        for key_pos in 0..total_seq_len {
+                            let v_offset = key_pos * n_kv_h * dqkv + kv_head * dqkv + dim;
+                            let attn_idx = kv_head * n_groups * seq_len * total_seq_len 
+                                         + group * seq_len * total_seq_len 
+                                         + query_pos * total_seq_len 
+                                         + key_pos;
+                            weighted_sum += att_scores_data[attn_idx] * v_data[v_offset];
+                        }
+                        hidden_states_data[output_offset + dim] = weighted_sum;
                     }
-                    hidden_states_data[out_offset + d] = val;
                 }
             }
         }
     }
 }
+
 
 fn mlp(
     residual: &mut Tensor<f32>,
