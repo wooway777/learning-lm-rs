@@ -120,51 +120,72 @@ pub fn swiglu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
 // hint: You don't need to do an explicit transpose of B
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
     // todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    use std::iter::repeat;
+    
     let a_shape = a.shape();
     let b_shape = b.shape();
-    let c_shape = c.shape();
+    let c_shape = c.shape().to_vec();
     
-    assert_eq!(a_shape.len(), 2);
-    assert_eq!(b_shape.len(), 2);
-    assert_eq!(c_shape.len(), 2);
+    assert!(a_shape.len() >= 2 && b_shape.len() >= 2, "Inputs must be at least 2D");
+    assert_eq!(a_shape.last().unwrap(), b_shape.last().unwrap(), "Inner dimensions must match");
+    assert_eq!(c_shape[c_shape.len() - 2], a_shape[a_shape.len() - 2]);
+    assert_eq!(c_shape[c_shape.len() - 1], b_shape[b_shape.len() - 2]);
     
-    let m = a_shape[0];
-    let k = a_shape[1];
-    let n = b_shape[0];
+    let mut a_strides: Vec<usize> = vec![1];
+    let mut b_strides: Vec<usize> = vec![1];
+    let mut c_strides: Vec<usize> = vec![1];
     
-    assert_eq!(b_shape[1], k);
-    assert_eq!(c_shape[0], m);
-    assert_eq!(c_shape[1], n);
+    for i in (0..a_shape.len() - 1).rev() {
+        a_strides.insert(0, a_strides[0] * a_shape[i + 1]);
+    }
+    for i in (0..b_shape.len() - 1).rev() {
+        b_strides.insert(0, b_strides[0] * b_shape[i + 1]);
+    }
+    for i in (0..c_shape.len() - 1).rev() {
+        c_strides.insert(0, c_strides[0] * c_shape[i + 1]);
+    }
     
     let a_data = a.data();
     let b_data = b.data();
     let c_data = unsafe { c.data_mut() };
-
-    // Optimization 1: Loop reordering (better cache locality)
-    for j in 0..n {
-        for i in 0..m {
-            // Optimization 2: Use pointer arithmetic to reduce index calculations
-            let a_row = &a_data[i * k..(i + 1) * k];
-            let b_row = &b_data[j * k..(j + 1) * k];
-            
-            // Optimization 3: Manual loop unrolling (4-way)
-            let mut sum = 0.0;
-            let mut l = 0;
-            while l + 3 < k {
-                sum += a_row[l] * b_row[l] 
-                     + a_row[l+1] * b_row[l+1]
-                     + a_row[l+2] * b_row[l+2]
-                     + a_row[l+3] * b_row[l+3];
-                l += 4;
+    
+    let batch_dims = c_shape[..c_shape.len() - 2]
+        .iter()
+        .zip(a_shape[..a_shape.len() - 2].iter().chain(repeat(&1)))
+        .zip(b_shape[..b_shape.len() - 2].iter().chain(repeat(&1)))
+        .map(|((&c_dim, &a_dim), &b_dim)| c_dim.max(a_dim).max(b_dim))
+        .collect::<Vec<_>>();
+    
+    let m = a_shape[a_shape.len() - 2];
+    let k = a_shape[a_shape.len() - 1];
+    let n = b_shape[b_shape.len() - 2];
+    
+    for batch_idx in 0..batch_dims.iter().product::<usize>() {
+        let a_batch_offset = batch_idx % a_shape[..a_shape.len() - 2].iter().product::<usize>();
+        let b_batch_offset = batch_idx % b_shape[..b_shape.len() - 2].iter().product::<usize>();
+        let c_batch_offset = batch_idx;
+        
+        for j in 0..n {
+            for i in 0..m {
+                let a_row = &a_data[(a_batch_offset * m + i) * k..(a_batch_offset * m + i + 1) * k];
+                let b_row = &b_data[(b_batch_offset * n + j) * k..(b_batch_offset * n + j + 1) * k];
+                
+                let mut sum = 0.0;
+                let mut l = 0;
+                while l + 3 < k {
+                    sum += a_row[l] * b_row[l]
+                         + a_row[l+1] * b_row[l+1]
+                         + a_row[l+2] * b_row[l+2]
+                         + a_row[l+3] * b_row[l+3];
+                    l += 4;
+                }
+                for l in l..k {
+                    sum += a_row[l] * b_row[l];
+                }
+                
+                let idx = (c_batch_offset * m + i) * n + j;
+                c_data[idx] = f32::mul_add(alpha, sum, beta * c_data[idx]);
             }
-            // Remainder loop
-            for l in l..k {
-                sum += a_row[l] * b_row[l];
-            }
-            
-            // Optimization 4: Fused multiply-add
-            let idx = i * n + j;
-            c_data[idx] = f32::mul_add(alpha, sum, beta * c_data[idx]);
         }
     }
 }
